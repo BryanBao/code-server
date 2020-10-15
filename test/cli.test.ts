@@ -20,11 +20,14 @@ describe("parser", () => {
   // values the user actually set. These are only set after explicitly calling
   // `setDefaults`.
   const defaults = {
+    auth: "password",
+    host: "localhost",
+    port: 8080,
     "extensions-dir": path.join(paths.data, "extensions"),
     "user-data-dir": paths.data,
   }
 
-  it("should set defaults", () => {
+  it("should parse nothing", () => {
     assert.deepEqual(parse([]), { _: [] })
   })
 
@@ -230,6 +233,42 @@ describe("parser", () => {
     assert.deepEqual(parse(["--proxy-domain", "*.coder.com", "--proxy-domain", "test.com"]), {
       _: [],
       "proxy-domain": ["*.coder.com", "test.com"],
+    })
+  })
+
+  it("should enforce cert-key with cert value or otherwise generate one", async () => {
+    const args = parse(["--cert"])
+    assert.deepEqual(args, {
+      _: [],
+      cert: {
+        value: undefined,
+      },
+    })
+    assert.throws(() => parse(["--cert", "test"]), /--cert-key is missing/)
+    assert.deepEqual(await setDefaults(args), {
+      _: [],
+      ...defaults,
+      cert: {
+        value: path.join(tmpdir, "self-signed.cert"),
+      },
+      "cert-key": path.join(tmpdir, "self-signed.key"),
+    })
+  })
+
+  it("should override with --link", async () => {
+    const args = parse("--cert test --cert-key test --socket test --host 0.0.0.0 --port 8888 --link test".split(" "))
+    assert.deepEqual(await setDefaults(args), {
+      _: [],
+      ...defaults,
+      auth: "none",
+      host: "localhost",
+      link: {
+        value: "test",
+      },
+      port: 0,
+      cert: undefined,
+      "cert-key": path.resolve("test"),
+      socket: undefined,
     })
   })
 })
