@@ -3,7 +3,7 @@ import * as fs from "fs-extra"
 import * as http from "http"
 import * as path from "path"
 import { LatestResponse, UpdateHttpProvider } from "../src/node/app/update"
-import { AuthType } from "../src/node/http"
+import { AuthType } from "../src/node/cli"
 import { SettingsProvider, UpdateSettings } from "../src/node/settings"
 import { tmpdir } from "../src/node/util"
 
