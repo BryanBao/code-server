@@ -4,14 +4,9 @@ import { promises as fs } from "fs"
 import http from "http"
 import * as path from "path"
 import { CliMessage, OpenCommandPipeArgs } from "../../lib/vscode/src/vs/server/ipc"
-import { plural } from "../common/util"
-import { HealthHttpProvider } from "./routes/health"
-import { LoginHttpProvider } from "./routes/login"
-import { ProxyHttpProvider } from "./routes/proxy"
-import { StaticHttpProvider } from "./routes/static"
-import { UpdateHttpProvider } from "./routes/update"
-import { VscodeHttpProvider } from "./routes/vscode"
+import { createApp, ensureAddress } from "./app"
 import {
+  AuthType,
   DefaultedArgs,
   optionDescriptions,
   parse,
@@ -21,9 +16,8 @@ import {
   shouldRunVsCodeCli,
 } from "./cli"
 import { coderCloudBind } from "./coder-cloud"
-import { AuthType, HttpServer, HttpServerOptions } from "./http"
 import { loadPlugins } from "./plugin"
-import { generateCertificate, hash, humanPath, open } from "./util"
+import { humanPath, open } from "./util"
 import { ipcMain, WrapperProcess } from "./wrapper"
 
 let pkg: { version?: string; commit?: string } = {}
@@ -117,68 +111,43 @@ export const openInExistingInstance = async (args: DefaultedArgs, socketPath: st
 }
 
 const main = async (args: DefaultedArgs): Promise<void> => {
+  logger.info(`code-server ${version} ${commit}`)
+
   logger.info(`Using user-data-dir ${humanPath(args["user-data-dir"])}`)
   logger.trace(`Using extensions-dir ${humanPath(args["extensions-dir"])}`)
 
   const envPassword = !!process.env.PASSWORD
   const password = args.auth === AuthType.Password && (process.env.PASSWORD || args.password)
+  delete process.env.PASSWORD // Prevent leakage to child processes.
   if (args.auth === AuthType.Password && !password) {
     throw new Error("Please pass in a password via the config file or $PASSWORD")
   }
 
-  // Spawn the main HTTP server.
-  const options: HttpServerOptions = {
-    auth: args.auth,
-    commit,
-    host: args.host,
-    // The hash does not add any actual security but we do it for obfuscation purposes.
-    password: password ? hash(password) : undefined,
-    port: args.port,
-    proxyDomains: args["proxy-domain"],
-    socket: args.socket,
-    cert: args.cert && args.cert.value,
-    certKey: args["cert-key"],
-  }
-
-  if (options.cert && !options.certKey) {
-    throw new Error("--cert-key is missing")
-  }
-
-  const httpServer = new HttpServer(options)
-  httpServer.registerHttpProvider(["/", "/vscode"], VscodeHttpProvider, args)
-  httpServer.registerHttpProvider("/update", UpdateHttpProvider, false)
-  httpServer.registerHttpProvider("/proxy", ProxyHttpProvider)
-  httpServer.registerHttpProvider("/login", LoginHttpProvider, args.config!, envPassword)
-  httpServer.registerHttpProvider("/static", StaticHttpProvider)
-  httpServer.registerHttpProvider("/healthz", HealthHttpProvider, httpServer.heart)
-
-  await loadPlugins(httpServer, args)
-
   ipcMain.onDispose(() => {
-    httpServer.dispose().then((errors) => {
-      errors.forEach((error) => logger.error(error.message))
-    })
+    //  TODO: register disposables
   })
 
-  logger.info(`code-server ${version} ${commit}`)
-  logger.info(`Using config file ${humanPath(args.config)}`)
+  const [app, server] = await createApp(args)
+  const serverAddress = ensureAddress(server)
 
-  const serverAddress = await httpServer.listen()
+  // TODO: register routes
+  await loadPlugins(app, args)
+
+  logger.info(`Using config file ${humanPath(args.config)}`)
   logger.info(`HTTP server listening on ${serverAddress} ${args.link ? "(randomized by --link)" : ""}`)
 
   if (args.auth === AuthType.Password) {
+    logger.info("  - Authentication is enabled")
     if (envPassword) {
       logger.info("    - Using password from $PASSWORD")
     } else {
       logger.info(`    - Using password from ${humanPath(args.config)}`)
     }
-    logger.info("    - To disable use `--auth none`")
   } else {
-    logger.info(`  - No authentication ${args.link ? "(disabled by --link)" : ""}`)
+    logger.info(`  - Authentication is disabled ${args.link ? "(disabled by --link)" : ""}`)
   }
-  delete process.env.PASSWORD
 
-  if (httpServer.protocol === "https") {
+  if (args.cert) {
     logger.info(
       args.cert && args.cert.value
         ? `  - Using provided certificate and key for HTTPS`
@@ -188,14 +157,13 @@ const main = async (args: DefaultedArgs): Promise<void> => {
     logger.info("  - Not serving HTTPS")
   }
 
-  if (httpServer.proxyDomains.size > 0) {
-    logger.info(`  - ${plural(httpServer.proxyDomains.size, "Proxying the following domain")}:`)
-    httpServer.proxyDomains.forEach((domain) => logger.info(`    - *.${domain}`))
+  if (args["proxy-domain"] && args["proxy-domain"].length > 0) {
+    // TODO: proxy these domains
   }
 
   if (args.link) {
     try {
-      await coderCloudBind(serverAddress!, args.link.value)
+      await coderCloudBind(serverAddress, args.link.value)
       logger.info("  - Connected to cloud agent")
     } catch (err) {
       logger.error(err.message)
@@ -203,7 +171,7 @@ const main = async (args: DefaultedArgs): Promise<void> => {
     }
   }
 
-  if (serverAddress && !options.socket && args.open) {
+  if (typeof serverAddress === "string" && !args.socket && args.open) {
     // The web socket doesn't seem to work if browsing with 0.0.0.0.
     const openAddress = serverAddress.replace(/:\/\/0.0.0.0/, "://localhost")
     await open(openAddress).catch((error: Error) => {
